@@ -21,8 +21,20 @@ st.markdown("""
     .deadline-urgent { color: #DC143C; font-weight: bold; }
     .deadline-warning { color: #FFA500; font-weight: bold; }
     .deadline-normal { color: #32CD32; }
-    .task-card { border:1px solid #ddd; border-radius:8px; padding:12px; margin-bottom:10px; background:#f9f9f9; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+    .task-card { 
+        border: 1px solid #ddd; 
+        border-radius: 8px; 
+        padding: 12px; 
+        margin-bottom: 10px; 
+        background: #f9f9f9; 
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1); 
+        color: #333; /* Добавил цвет текста по умолчанию */
+    }
+    .task-card b { color: #333; } /* Цвет для жирного текста */
+    .task-card small { color: #666; } /* Цвет для мелкого текста */
     .action-btn { margin: 2px; }
+    .project-name { color: #333 !important; } /* Явно задаем цвет для названия проекта */
+    .task-title { color: #333 !important; } /* Явно задаем цвет для названия задачи */
 </style>
 """, unsafe_allow_html=True)
 
@@ -181,9 +193,10 @@ def create_task(title, description, deadline, status, project_id):
 
 # Обновление статуса задачи
 def update_task_status(task_id, status):
-    query = "UPDATE tasks SET status = %s WHERE id = %s"
     if status == 'completed':
         query = "UPDATE tasks SET status = %s, completed_at = NOW() WHERE id = %s"
+    else:
+        query = "UPDATE tasks SET status = %s WHERE id = %s"
     return execute_query(query, (status, task_id))
 
 # Обновление задачи
@@ -206,9 +219,10 @@ def get_statistics(tasks):
     pending = len([t for t in tasks if t['status'] == 'pending'])
     in_progress = len([t for t in tasks if t['status'] == 'in_progress'])
     completed = len([t for t in tasks if t['status'] == 'completed'])
-    overdue = len([t for t in tasks if t['status'] == 'overdue' or (t['deadline'] and t['deadline'] < date.today() and t['status'] != 'completed')])
     
     today = date.today()
+    overdue = len([t for t in tasks if (t['deadline'] and t['deadline'] < today and t['status'] != 'completed')])
+    
     due_today = len([t for t in tasks if t['deadline'] == today])
     due_tomorrow = len([t for t in tasks if t['deadline'] == today + timedelta(days=1)])
     
@@ -222,6 +236,16 @@ def get_statistics(tasks):
         'due_tomorrow': due_tomorrow
     }
 
+# Инициализация session state
+if 'show_add_task' not in st.session_state:
+    st.session_state.show_add_task = False
+if 'show_add_project' not in st.session_state:
+    st.session_state.show_add_project = False
+if 'editing_task' not in st.session_state:
+    st.session_state.editing_task = None
+if 'edit_task_data' not in st.session_state:
+    st.session_state.edit_task_data = None
+
 # Заголовок
 st.title("🚀 Task Planner Pro Dashboard")
 st.caption(f"Обновлено: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
@@ -231,9 +255,11 @@ col1, col2, col3 = st.columns(3)
 with col1:
     if st.button("➕ Добавить задачу", use_container_width=True):
         st.session_state.show_add_task = True
+        st.rerun()
 with col2:
     if st.button("📁 Добавить проект", use_container_width=True):
         st.session_state.show_add_project = True
+        st.rerun()
 with col3:
     if st.button("🔄 Обновить данные", use_container_width=True):
         st.cache_data.clear()
@@ -252,7 +278,11 @@ if st.session_state.get('show_add_project'):
         with col2:
             project_user_id = st.number_input("ID пользователя*", min_value=1, value=1, step=1)
         
-        submitted = st.form_submit_button("✅ Создать проект")
+        col_btn1, col_btn2 = st.columns(2)
+        with col_btn1:
+            submitted = st.form_submit_button("✅ Создать проект", use_container_width=True)
+        with col_btn2:
+            cancelled = st.form_submit_button("❌ Отмена", use_container_width=True)
         
         if submitted:
             if not project_name.strip():
@@ -264,10 +294,10 @@ if st.session_state.get('show_add_project'):
                     st.session_state.show_add_project = False
                     st.cache_data.clear()
                     st.rerun()
-    
-    if st.button("❌ Отмена"):
-        st.session_state.show_add_project = False
-        st.rerun()
+        
+        if cancelled:
+            st.session_state.show_add_project = False
+            st.rerun()
     
     st.divider()
 
@@ -303,7 +333,11 @@ if st.session_state.get('show_add_task'):
             selected_status_name = st.selectbox("Статус*", list(status_options.keys()))
             task_status = status_options[selected_status_name]
         
-        submitted = st.form_submit_button("✅ Создать задачу")
+        col_btn1, col_btn2 = st.columns(2)
+        with col_btn1:
+            submitted = st.form_submit_button("✅ Создать задачу", use_container_width=True)
+        with col_btn2:
+            cancelled = st.form_submit_button("❌ Отмена", use_container_width=True)
         
         if submitted:
             if not task_title.strip():
@@ -322,10 +356,10 @@ if st.session_state.get('show_add_task'):
                     st.session_state.show_add_task = False
                     st.cache_data.clear()
                     st.rerun()
-    
-    if st.button("❌ Отмена"):
-        st.session_state.show_add_task = False
-        st.rerun()
+        
+        if cancelled:
+            st.session_state.show_add_task = False
+            st.rerun()
     
     st.divider()
 
@@ -487,10 +521,16 @@ if st.session_state.get('editing_task'):
             all_projects = load_projects()
             current_project = get_project_by_id(task['project_id']) if task['project_id'] else None
             project_names = [p['name'] for p in all_projects]
+            
+            # Находим индекс текущего проекта
+            project_index = 0
+            if current_project and current_project['name'] in project_names:
+                project_index = project_names.index(current_project['name']) + 1
+            
             selected_project_name = st.selectbox(
                 "Проект*",
                 ['Без проекта'] + project_names,
-                index=project_names.index(current_project['name']) + 1 if current_project and current_project['name'] in project_names else 0
+                index=project_index
             )
             selected_project = next((p for p in all_projects if p['name'] == selected_project_name), None)
             
@@ -580,8 +620,8 @@ for idx, status in enumerate(status_order):
                 
                 task_html = f"""
                 <div class="task-card">
-                    <b>{task['title']}</b><br>
-                    <small>📁 {task['project_name'] or 'Без проекта'}</small><br>
+                    <b class="task-title">{task['title']}</b><br>
+                    <small class="project-name">📁 {task['project_name'] or 'Без проекта'}</small><br>
                     <small>🕗 <span class="{deadline_class}">{deadline_str}</span></small>
                 </div>
                 """
