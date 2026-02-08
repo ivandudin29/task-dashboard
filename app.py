@@ -28,15 +28,18 @@ st.markdown("""
         margin-bottom: 10px; 
         background: #f9f9f9; 
         box-shadow: 0 2px 4px rgba(0,0,0,0.1); 
-        color: #333; /* Добавил цвет текста по умолчанию */
+        color: #333;
     }
-    .task-card b { color: #333; } /* Цвет для жирного текста */
-    .task-card small { color: #666; } /* Цвет для мелкого текста */
+    .task-card b { color: #333; }
+    .task-card small { color: #666; }
     .action-btn { margin: 2px; }
-    .project-name { color: #333 !important; } /* Явно задаем цвет для названия проекта */
-    .task-title { color: #333 !important; } /* Явно задаем цвет для названия задачи */
+    .project-name { color: #333 !important; }
+    .task-title { color: #333 !important; }
 </style>
 """, unsafe_allow_html=True)
+
+# Константа - ваш ID пользователя
+USER_ID = 1  # Фиксированный ID для одного пользователя
 
 # Подключение к БД
 @st.cache_resource
@@ -51,7 +54,7 @@ def init_connection():
 
 conn = init_connection()
 
-# Функция для выполнения запросов (INSERT/UPDATE/DELETE)
+# Функция для выполнения запросов
 def execute_query(query, params=None):
     cursor = conn.cursor()
     try:
@@ -67,7 +70,7 @@ def execute_query(query, params=None):
 
 # Загрузка данных
 @st.cache_data(ttl=30)
-def load_data(user_id=None, project_id=None, status_filter=None, deadline_filter=None):
+def load_data(project_id=None, status_filter=None, deadline_filter=None):
     cursor = conn.cursor()
     
     query = """
@@ -80,17 +83,12 @@ def load_data(user_id=None, project_id=None, status_filter=None, deadline_filter
             t.created_at,
             t.completed_at,
             p.name AS project_name,
-            p.id AS project_id,
-            p.user_id
+            p.id AS project_id
         FROM tasks t
         LEFT JOIN projects p ON t.project_id = p.id
-        WHERE 1=1
+        WHERE p.user_id = %s
     """
-    params = []
-    
-    if user_id:
-        query += " AND p.user_id = %s"
-        params.append(user_id)
+    params = [USER_ID]
     
     if project_id:
         query += " AND t.project_id = %s"
@@ -128,43 +126,76 @@ def load_data(user_id=None, project_id=None, status_filter=None, deadline_filter
     
     return [dict(zip(columns, row)) for row in rows]
 
-# Загрузка пользователей
+# Загрузка проектов
 @st.cache_data(ttl=300)
-def load_users():
+def load_projects():
     cursor = conn.cursor()
-    cursor.execute("""
-        SELECT DISTINCT user_id 
-        FROM projects 
-        ORDER BY user_id
-    """)
-    users = [row[0] for row in cursor.fetchall()]
-    cursor.close()
-    return users
-
-# Загрузка проектов пользователя
-@st.cache_data(ttl=300)
-def load_projects(user_id=None):
-    cursor = conn.cursor()
-    if user_id:
-        cursor.execute("SELECT id, name FROM projects WHERE user_id = %s ORDER BY name", (user_id,))
-    else:
-        cursor.execute("SELECT id, name FROM projects ORDER BY name")
+    cursor.execute("SELECT id, name FROM projects WHERE user_id = %s ORDER BY name", (USER_ID,))
     projects = [{"id": row[0], "name": row[1]} for row in cursor.fetchall()]
     cursor.close()
     return projects
 
-# Получение проекта по ID
-def get_project_by_id(project_id):
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, name, user_id FROM projects WHERE id = %s", (project_id,))
-    row = cursor.fetchone()
-    cursor.close()
-    if row:
-        return {"id": row[0], "name": row[1], "user_id": row[2]}
-    return None
+# Обновление существующих задач и проектов
+def update_existing_data():
+    """Обновление существующих данных для использования с USER_ID"""
+    try:
+        cursor = conn.cursor()
+        
+        # 1. Проверяем, есть ли задачи без проекта
+        cursor.execute("""
+            SELECT COUNT(*) as count 
+            FROM tasks 
+            WHERE project_id IS NULL OR project_id NOT IN (SELECT id FROM projects)
+        """)
+        orphaned_tasks = cursor.fetchone()[0]
+        
+        if orphaned_tasks > 0:
+            st.info(f"Найдено {orphaned_tasks} задач без проекта")
+        
+        # 2. Создаем дефолтный проект для существующих данных
+        cursor.execute("""
+            SELECT id FROM projects WHERE user_id = %s LIMIT 1
+        """, (USER_ID,))
+        
+        default_project = cursor.fetchone()
+        
+        if not default_project:
+            # Создаем дефолтный проект
+            cursor.execute("""
+                INSERT INTO projects (name, user_id, created_at)
+                VALUES (%s, %s, NOW())
+                RETURNING id
+            """, ("Мои задачи", USER_ID))
+            default_project_id = cursor.fetchone()[0]
+            
+            # Обновляем все задачи без проекта или с несуществующим проектом
+            cursor.execute("""
+                UPDATE tasks 
+                SET project_id = %s 
+                WHERE project_id IS NULL 
+                OR project_id NOT IN (SELECT id FROM projects)
+            """, (default_project_id,))
+            
+            st.success(f"Создан дефолтный проект 'Мои задачи' (ID: {default_project_id})")
+        
+        # 3. Обновляем проекты без user_id
+        cursor.execute("""
+            UPDATE projects 
+            SET user_id = %s 
+            WHERE user_id IS NULL OR user_id != %s
+        """, (USER_ID, USER_ID))
+        
+        conn.commit()
+        st.success("Данные успешно обновлены для использования с вашим аккаунтом")
+        
+    except Exception as e:
+        conn.rollback()
+        st.error(f"Ошибка при обновлении данных: {e}")
+    finally:
+        cursor.close()
 
-# Создание нового проекта
-def create_project(name, user_id):
+# Создание проекта
+def create_project(name):
     query = """
         INSERT INTO projects (name, user_id, created_at)
         VALUES (%s, %s, NOW())
@@ -172,7 +203,7 @@ def create_project(name, user_id):
     """
     cursor = conn.cursor()
     try:
-        cursor.execute(query, (name, user_id))
+        cursor.execute(query, (name, USER_ID))
         project_id = cursor.fetchone()[0]
         conn.commit()
         return project_id
@@ -183,7 +214,7 @@ def create_project(name, user_id):
     finally:
         cursor.close()
 
-# Создание новой задачи
+# Создание задачи
 def create_task(title, description, deadline, status, project_id):
     query = """
         INSERT INTO tasks (title, description, deadline, status, project_id, created_at)
@@ -245,12 +276,23 @@ if 'editing_task' not in st.session_state:
     st.session_state.editing_task = None
 if 'edit_task_data' not in st.session_state:
     st.session_state.edit_task_data = None
+if 'data_migrated' not in st.session_state:
+    st.session_state.data_migrated = False
 
 # Заголовок
 st.title("🚀 Task Planner Pro Dashboard")
 st.caption(f"Обновлено: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
 
-# Быстрые действия в шапке
+# Кнопка для миграции данных
+if not st.session_state.data_migrated:
+    if st.button("🔄 Синхронизировать данные с ботом", use_container_width=True):
+        with st.spinner("Синхронизация данных..."):
+            update_existing_data()
+            st.session_state.data_migrated = True
+            st.cache_data.clear()
+            st.rerun()
+
+# Быстрые действия
 col1, col2, col3 = st.columns(3)
 with col1:
     if st.button("➕ Добавить задачу", use_container_width=True):
@@ -272,11 +314,7 @@ if st.session_state.get('show_add_project'):
     st.subheader("📁 Создать новый проект")
     
     with st.form("add_project_form"):
-        col1, col2 = st.columns(2)
-        with col1:
-            project_name = st.text_input("Название проекта*", placeholder="Например: Веб-сайт, Мобильное приложение")
-        with col2:
-            project_user_id = st.number_input("ID пользователя*", min_value=1, value=1, step=1)
+        project_name = st.text_input("Название проекта*", placeholder="Например: Веб-сайт, Мобильное приложение")
         
         col_btn1, col_btn2 = st.columns(2)
         with col_btn1:
@@ -288,7 +326,7 @@ if st.session_state.get('show_add_project'):
             if not project_name.strip():
                 st.error("❌ Название проекта обязательно")
             else:
-                project_id = create_project(project_name.strip(), project_user_id)
+                project_id = create_project(project_name.strip())
                 if project_id:
                     st.success(f"✅ Проект '{project_name}' создан! ID: {project_id}")
                     st.session_state.show_add_project = False
@@ -313,7 +351,6 @@ if st.session_state.get('show_add_task'):
             task_description = st.text_area("Описание", placeholder="Подробное описание задачи...", height=100)
         
         with col2:
-            # Загрузка проектов для выбора
             all_projects = load_projects()
             project_names = [p['name'] for p in all_projects]
             selected_project_name = st.selectbox("Проект*", ['Без проекта'] + project_names)
@@ -367,14 +404,11 @@ if st.session_state.get('show_add_task'):
 with st.sidebar:
     st.header("🎛️ Фильтры")
     
-    # Выбор пользователя
-    users = load_users()
-    user_options = ['Все пользователи'] + [str(u) for u in users]
-    selected_user = st.selectbox("Пользователь", user_options)
-    user_id = int(selected_user) if selected_user != 'Все пользователи' else None
+    # Информация о пользователе
+    st.info(f"👤 Пользователь: {USER_ID}")
     
     # Выбор проекта
-    projects = load_projects(user_id)
+    projects = load_projects()
     project_options = ['Все проекты'] + [p['name'] for p in projects]
     selected_project = st.selectbox("Проект", project_options)
     project_id = next((p['id'] for p in projects if p['name'] == selected_project), None) if selected_project != 'Все проекты' else None
@@ -407,7 +441,6 @@ with st.sidebar:
     
     # Загрузка данных с фильтрами
     tasks = load_data(
-        user_id=user_id,
         project_id=project_id,
         status_filter=status_filter if status_filter != 'all' else None,
         deadline_filter=deadline_filter
@@ -442,7 +475,6 @@ if urgent_tasks:
     for task in urgent_tasks[:10]:
         days_left = (task['deadline'] - today).days
         
-        # Иконка и цвет
         if days_left < 0:
             icon = "🔴"
             deadline_class = "deadline-urgent"
@@ -456,7 +488,6 @@ if urgent_tasks:
             icon = "🟢"
             deadline_class = "deadline-normal"
         
-        # Статус с цветом
         status_map = {
             'pending': '<span class="status-pending">⏳ В ожидании</span>',
             'in_progress': '<span class="status-in_progress">🔄 В работе</span>',
@@ -479,7 +510,6 @@ if urgent_tasks:
                     st.markdown(f"**Осталось:** {days_left} дн.")
             
             with col3:
-                # Быстрые действия
                 if task['status'] != 'completed':
                     if st.button("✅ Завершить", key=f"complete_{task['id']}", use_container_width=True):
                         if update_task_status(task['id'], 'completed'):
@@ -519,13 +549,11 @@ if st.session_state.get('editing_task'):
         
         with col2:
             all_projects = load_projects()
-            current_project = get_project_by_id(task['project_id']) if task['project_id'] else None
             project_names = [p['name'] for p in all_projects]
             
-            # Находим индекс текущего проекта
             project_index = 0
-            if current_project and current_project['name'] in project_names:
-                project_index = project_names.index(current_project['name']) + 1
+            if task['project_name'] and task['project_name'] in project_names:
+                project_index = project_names.index(task['project_name']) + 1
             
             selected_project_name = st.selectbox(
                 "Проект*",
@@ -606,7 +634,6 @@ for idx, status in enumerate(status_order):
             for task in status_tasks[:8]:
                 deadline_str = task['deadline'].strftime('%d.%m') if task['deadline'] else '—'
                 
-                # Цвет дедлайна
                 if task['deadline']:
                     days_left = (task['deadline'] - today).days
                     if days_left < 0:
@@ -670,4 +697,4 @@ else:
 
 # Footer
 st.divider()
-st.caption("Task Planner Pro Dashboard • Данные обновляются каждые 30 секунд")
+st.caption(f"Task Planner Pro Dashboard • Пользователь: {USER_ID} • Данные обновляются каждые 30 секунд")
