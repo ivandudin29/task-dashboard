@@ -38,8 +38,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Константа - ваш ID пользователя
-USER_ID = 1  # Фиксированный ID для одного пользователя
+# Ваш Telegram ID
+TELEGRAM_USER_ID = 209010651
 
 # Подключение к БД
 @st.cache_resource
@@ -88,7 +88,7 @@ def load_data(project_id=None, status_filter=None, deadline_filter=None):
         LEFT JOIN projects p ON t.project_id = p.id
         WHERE p.user_id = %s
     """
-    params = [USER_ID]
+    params = [TELEGRAM_USER_ID]
     
     if project_id:
         query += " AND t.project_id = %s"
@@ -130,67 +130,50 @@ def load_data(project_id=None, status_filter=None, deadline_filter=None):
 @st.cache_data(ttl=300)
 def load_projects():
     cursor = conn.cursor()
-    cursor.execute("SELECT id, name FROM projects WHERE user_id = %s ORDER BY name", (USER_ID,))
+    cursor.execute("SELECT id, name FROM projects WHERE user_id = %s ORDER BY name", (TELEGRAM_USER_ID,))
     projects = [{"id": row[0], "name": row[1]} for row in cursor.fetchall()]
     cursor.close()
     return projects
 
-# Обновление существующих задач и проектов
-def update_existing_data():
-    """Обновление существующих данных для использования с USER_ID"""
+# Обновление существующих данных
+def migrate_web_data_to_telegram():
+    """Перенос данных, созданных в вебе, в ваш Telegram аккаунт"""
     try:
         cursor = conn.cursor()
         
-        # 1. Проверяем, есть ли задачи без проекта
-        cursor.execute("""
-            SELECT COUNT(*) as count 
-            FROM tasks 
-            WHERE project_id IS NULL OR project_id NOT IN (SELECT id FROM projects)
-        """)
-        orphaned_tasks = cursor.fetchone()[0]
-        
-        if orphaned_tasks > 0:
-            st.info(f"Найдено {orphaned_tasks} задач без проекта")
-        
-        # 2. Создаем дефолтный проект для существующих данных
-        cursor.execute("""
-            SELECT id FROM projects WHERE user_id = %s LIMIT 1
-        """, (USER_ID,))
-        
-        default_project = cursor.fetchone()
-        
-        if not default_project:
-            # Создаем дефолтный проект
-            cursor.execute("""
-                INSERT INTO projects (name, user_id, created_at)
-                VALUES (%s, %s, NOW())
-                RETURNING id
-            """, ("Мои задачи", USER_ID))
-            default_project_id = cursor.fetchone()[0]
-            
-            # Обновляем все задачи без проекта или с несуществующим проектом
-            cursor.execute("""
-                UPDATE tasks 
-                SET project_id = %s 
-                WHERE project_id IS NULL 
-                OR project_id NOT IN (SELECT id FROM projects)
-            """, (default_project_id,))
-            
-            st.success(f"Создан дефолтный проект 'Мои задачи' (ID: {default_project_id})")
-        
-        # 3. Обновляем проекты без user_id
+        # 1. Обновляем проекты с user_id = 1 на ваш Telegram ID
         cursor.execute("""
             UPDATE projects 
             SET user_id = %s 
-            WHERE user_id IS NULL OR user_id != %s
-        """, (USER_ID, USER_ID))
+            WHERE user_id = 1 OR user_id IS NULL
+        """, (TELEGRAM_USER_ID,))
+        
+        projects_updated = cursor.rowcount
+        
+        # 2. Для задач, привязанных к проектам, которые были обновлены
+        cursor.execute("""
+            SELECT COUNT(*) 
+            FROM tasks t
+            JOIN projects p ON t.project_id = p.id
+            WHERE p.user_id = %s
+        """, (TELEGRAM_USER_ID,))
+        
+        tasks_count = cursor.fetchone()[0]
         
         conn.commit()
-        st.success("Данные успешно обновлены для использования с вашим аккаунтом")
+        
+        return {
+            'success': True,
+            'projects_updated': projects_updated,
+            'tasks_migrated': tasks_count
+        }
         
     except Exception as e:
         conn.rollback()
-        st.error(f"Ошибка при обновлении данных: {e}")
+        return {
+            'success': False,
+            'error': str(e)
+        }
     finally:
         cursor.close()
 
@@ -203,7 +186,7 @@ def create_project(name):
     """
     cursor = conn.cursor()
     try:
-        cursor.execute(query, (name, USER_ID))
+        cursor.execute(query, (name, TELEGRAM_USER_ID))
         project_id = cursor.fetchone()[0]
         conn.commit()
         return project_id
@@ -285,12 +268,20 @@ st.caption(f"Обновлено: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}"
 
 # Кнопка для миграции данных
 if not st.session_state.data_migrated:
-    if st.button("🔄 Синхронизировать данные с ботом", use_container_width=True):
-        with st.spinner("Синхронизация данных..."):
-            update_existing_data()
-            st.session_state.data_migrated = True
-            st.cache_data.clear()
-            st.rerun()
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.info(f"👤 Используется ваш Telegram ID: {TELEGRAM_USER_ID}")
+    with col2:
+        if st.button("🔄 Перенести данные в мой аккаунт", use_container_width=True):
+            with st.spinner("Перенос данных..."):
+                result = migrate_web_data_to_telegram()
+                if result['success']:
+                    st.success(f"✅ Данные успешно перенесены! Обновлено проектов: {result['projects_updated']}, задач: {result['tasks_migrated']}")
+                    st.session_state.data_migrated = True
+                    st.cache_data.clear()
+                    st.rerun()
+                else:
+                    st.error(f"❌ Ошибка при переносе данных: {result['error']}")
 
 # Быстрые действия
 col1, col2, col3 = st.columns(3)
@@ -405,7 +396,7 @@ with st.sidebar:
     st.header("🎛️ Фильтры")
     
     # Информация о пользователе
-    st.info(f"👤 Пользователь: {USER_ID}")
+    st.info(f"👤 Пользователь: {TELEGRAM_USER_ID}")
     
     # Выбор проекта
     projects = load_projects()
@@ -697,4 +688,4 @@ else:
 
 # Footer
 st.divider()
-st.caption(f"Task Planner Pro Dashboard • Пользователь: {USER_ID} • Данные обновляются каждые 30 секунд")
+st.caption(f"Task Planner Pro Dashboard • Пользователь: {TELEGRAM_USER_ID} • Данные обновляются каждые 30 секунд")
