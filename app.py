@@ -35,6 +35,13 @@ st.markdown("""
     .action-btn { margin: 2px; }
     .project-name { color: #333 !important; }
     .task-title { color: #333 !important; }
+    .project-group { 
+        background-color: #f0f2f6; 
+        padding: 10px 15px; 
+        border-radius: 8px; 
+        margin: 15px 0 10px 0;
+        border-left: 4px solid #4169E1;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -459,7 +466,8 @@ st.divider()
 st.subheader("⏰ Ближайшие дедлайны")
 
 today = date.today()
-urgent_tasks = [t for t in tasks if t['deadline'] and today <= t['deadline'] <= today + timedelta(days=7)]
+# ИСКЛЮЧАЕМ завершенные задачи из этого раздела
+urgent_tasks = [t for t in tasks if t['deadline'] and t['status'] != 'completed' and today <= t['deadline'] <= today + timedelta(days=7)]
 urgent_tasks.sort(key=lambda x: x['deadline'])
 
 if urgent_tasks:
@@ -522,7 +530,7 @@ if urgent_tasks:
             if task['description']:
                 st.markdown(f"**Описание:** {task['description']}")
 else:
-    st.info("Нет задач с дедлайнами в ближайшие 7 дней")
+    st.info("Нет активных задач с дедлайнами в ближайшие 7 дней (завершенные задачи скрыты)")
 
 # Форма редактирования задачи
 if st.session_state.get('editing_task'):
@@ -648,41 +656,59 @@ for idx, status in enumerate(status_order):
             if len(status_tasks) > 8:
                 st.caption(f"... и ещё {len(status_tasks) - 8} задач")
 
-# Таблица задач
+# Таблица задач с группировкой по проектам
 st.divider()
 st.subheader("📝 Список задач")
 
 if tasks:
+    # Группируем задачи по проектам
+    grouped_tasks = {}
     for task in tasks:
-        status_map = {
-            'pending': '⏳ В ожидании',
-            'in_progress': '🔄 В работе',
-            'completed': '✅ Завершено',
-            'overdue': '⚠️ Просрочено'
-        }
-        status_display = status_map.get(task['status'], task['status'])
+        project_name = task['project_name'] or 'Без проекта'
+        if project_name not in grouped_tasks:
+            grouped_tasks[project_name] = []
+        grouped_tasks[project_name].append(task)
+    
+    # Сортируем проекты по алфавиту
+    sorted_projects = sorted(grouped_tasks.keys())
+    
+    for project_name in sorted_projects:
+        project_tasks = grouped_tasks[project_name]
         
-        deadline_str = task['deadline'].strftime('%d.%m.%Y') if task['deadline'] else '—'
+        # Заголовок группы проектов
+        st.markdown(f'<div class="project-group"><h4>📁 {project_name} ({len(project_tasks)} задач)</h4></div>', unsafe_allow_html=True)
         
-        with st.container():
-            col1, col2, col3, col4, col5 = st.columns([3, 2, 1.5, 1.5, 1])
-            with col1:
-                st.markdown(f"**{task['title']}**")
-                if task['description']:
-                    st.caption(task['description'][:60] + "..." if len(task['description']) > 60 else task['description'])
-            with col2:
-                st.markdown(f"📁 {task['project_name'] or '—'}")
-            with col3:
-                st.markdown(status_display)
-            with col4:
-                st.markdown(f"🕗 {deadline_str}")
-            with col5:
-                if st.button("✏️", key=f"table_edit_{task['id']}", help="Редактировать"):
-                    st.session_state.editing_task = task['id']
-                    st.session_state.edit_task_data = task
-                    st.rerun()
+        # Отображаем задачи проекта
+        for task in project_tasks:
+            status_map = {
+                'pending': '⏳ В ожидании',
+                'in_progress': '🔄 В работе',
+                'completed': '✅ Завершено',
+                'overdue': '⚠️ Просрочено'
+            }
+            status_display = status_map.get(task['status'], task['status'])
             
-            st.divider()
+            deadline_str = task['deadline'].strftime('%d.%m.%Y') if task['deadline'] else '—'
+            
+            with st.container():
+                col1, col2, col3, col4, col5 = st.columns([3, 2, 1.5, 1.5, 1])
+                with col1:
+                    st.markdown(f"**{task['title']}**")
+                    if task['description']:
+                        st.caption(task['description'][:80] + "..." if len(task['description']) > 80 else task['description'])
+                with col2:
+                    st.markdown(f"📁 {task['project_name'] or '—'}")
+                with col3:
+                    st.markdown(status_display)
+                with col4:
+                    st.markdown(f"🕗 {deadline_str}")
+                with col5:
+                    if st.button("✏️", key=f"table_edit_{task['id']}", help="Редактировать"):
+                        st.session_state.editing_task = task['id']
+                        st.session_state.edit_task_data = task
+                        st.rerun()
+                
+                st.divider()
 else:
     st.info("Нет задач, удовлетворяющих фильтрам")
 
