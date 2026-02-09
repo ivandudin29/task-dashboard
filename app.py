@@ -2,6 +2,7 @@ import streamlit as st
 import psycopg2
 from datetime import datetime, timedelta, date
 import os
+import time
 
 # Настройки страницы
 st.set_page_config(
@@ -11,7 +12,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Стили
+# Стили - оптимизированные
 st.markdown("""
 <style>
     .status-pending { background-color: #FFD700; color: #000; padding: 4px 8px; border-radius: 4px; font-weight: bold; }
@@ -29,23 +30,12 @@ st.markdown("""
         background: #f9f9f9; 
         box-shadow: 0 2px 4px rgba(0,0,0,0.1); 
         color: #333;
-        transition: transform 0.2s, box-shadow 0.2s;
     }
-    .task-card:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 4px 8px rgba(0,0,0,0.15);
-    }
-    .task-card b { color: #333; }
-    .task-card small { color: #666; }
-    .action-btn { margin: 2px; }
-    .project-name { color: #333 !important; }
-    .task-title { color: #333 !important; }
     .project-group { 
         background: linear-gradient(135deg, #1E3A8A 0%, #3B82F6 100%); 
         padding: 12px 20px; 
         border-radius: 8px; 
         margin: 20px 0 15px 0;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         color: white !important;
     }
     .project-group h4 { 
@@ -53,51 +43,12 @@ st.markdown("""
         margin: 0;
         font-size: 1.2rem;
     }
-    .collapsed { 
-        background: linear-gradient(135deg, #3B82F6 0%, #60A5FA 100%);
-        padding: 12px 20px; 
-        border-radius: 8px; 
-        margin: 20px 0 15px 0;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    .stButton button {
+        transition: all 0.3s ease;
     }
-    .collapsed h4 { 
-        color: white !important; 
-        margin: 0;
-        font-size: 1.2rem;
-    }
-    .task-actions {
-        display: flex;
-        gap: 5px;
-        margin-top: 8px;
-        flex-wrap: wrap;
-    }
-    .task-actions button {
-        padding: 4px 8px !important;
-        font-size: 0.8rem !important;
-        min-height: unset !important;
-    }
-    .task-content {
-        padding: 15px;
-    }
-    .task-meta {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 10px;
-        margin-top: 8px;
-        font-size: 0.9rem;
-    }
-    .task-project {
-        background-color: #e8f4fd;
-        padding: 2px 8px;
-        border-radius: 4px;
-        color: #1E3A8A;
-        font-weight: 500;
-    }
-    .task-description {
-        margin-top: 8px;
-        color: #666;
-        font-size: 0.9rem;
-        line-height: 1.4;
+    .stButton button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
     }
 </style>
 """, unsafe_allow_html=True)
@@ -105,21 +56,40 @@ st.markdown("""
 # Ваш Telegram ID
 TELEGRAM_USER_ID = 209010651
 
-# Подключение к БД
-@st.cache_resource
+# Подключение к БД с обработкой ошибок
+@st.cache_resource(ttl=3600)
 def init_connection():
-    return psycopg2.connect(
-        host="dpg-d623k7m3jp1c73bhruk0-a",
-        database="task_planner_3k47",
-        user="task_planner_user",
-        password="esbiIzvvhnGcZF1NOc4oRxUs8vyW24by",
-        port=5432
-    )
+    max_retries = 3
+    retry_delay = 2
+    
+    for attempt in range(max_retries):
+        try:
+            conn = psycopg2.connect(
+                host="dpg-d623k7m3jp1c73bhruk0-a",
+                database="task_planner_3k47",
+                user="task_planner_user",
+                password="esbiIzvvhnGcZF1NOc4oRxUs8vyW24by",
+                port=5432,
+                connect_timeout=10
+            )
+            # Проверяем подключение
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+            cursor.close()
+            return conn
+        except Exception as e:
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)
+            else:
+                st.error(f"Не удалось подключиться к базе данных после {max_retries} попыток: {e}")
+                return None
 
-conn = init_connection()
-
-# Функция для выполнения запросов
+# Функция для выполнения запросов с обработкой ошибок
 def execute_query(query, params=None):
+    conn = init_connection()
+    if conn is None:
+        return False
+    
     cursor = conn.cursor()
     try:
         cursor.execute(query, params or ())
@@ -132,80 +102,106 @@ def execute_query(query, params=None):
     finally:
         cursor.close()
 
-# Загрузка данных
-@st.cache_data(ttl=30)
+# Оптимизированная загрузка данных
+@st.cache_data(ttl=60, show_spinner="Загрузка задач...")
 def load_data(project_id=None, status_filter=None, deadline_filter=None):
+    conn = init_connection()
+    if conn is None:
+        return []
+    
     cursor = conn.cursor()
     
-    query = """
-        SELECT 
-            t.id,
-            t.title,
-            t.description,
-            t.deadline,
-            t.status,
-            t.created_at,
-            t.completed_at,
-            p.name AS project_name,
-            p.id AS project_id
-        FROM tasks t
-        LEFT JOIN projects p ON t.project_id = p.id
-        WHERE p.user_id = %s
-    """
-    params = [TELEGRAM_USER_ID]
-    
-    if project_id:
-        query += " AND t.project_id = %s"
-        params.append(project_id)
-    
-    if status_filter and status_filter != 'all':
-        query += " AND t.status = %s"
-        params.append(status_filter)
-    
-    today = date.today()
-    if deadline_filter == 'today':
-        query += " AND t.deadline = %s"
-        params.append(today)
-    elif deadline_filter == 'tomorrow':
-        query += " AND t.deadline = %s"
-        params.append(today + timedelta(days=1))
-    elif deadline_filter == 'next_3_days':
-        query += " AND t.deadline BETWEEN %s AND %s"
-        params.append(today)
-        params.append(today + timedelta(days=3))
-    elif deadline_filter == 'next_week':
-        query += " AND t.deadline BETWEEN %s AND %s"
-        params.append(today)
-        params.append(today + timedelta(days=7))
-    elif deadline_filter == 'overdue':
-        query += " AND t.deadline < %s AND t.status != 'completed'"
-        params.append(today)
-    
-    query += " ORDER BY t.deadline ASC NULLS LAST, t.status ASC"
-    
-    cursor.execute(query, params)
-    columns = [desc[0] for desc in cursor.description]
-    rows = cursor.fetchall()
-    cursor.close()
-    
-    return [dict(zip(columns, row)) for row in rows]
+    try:
+        query = """
+            SELECT 
+                t.id,
+                t.title,
+                t.description,
+                t.deadline,
+                t.status,
+                t.created_at,
+                t.completed_at,
+                p.name AS project_name,
+                p.id AS project_id
+            FROM tasks t
+            LEFT JOIN projects p ON t.project_id = p.id
+            WHERE p.user_id = %s
+        """
+        params = [TELEGRAM_USER_ID]
+        
+        conditions = []
+        
+        if project_id:
+            conditions.append("t.project_id = %s")
+            params.append(project_id)
+        
+        if status_filter and status_filter != 'all':
+            conditions.append("t.status = %s")
+            params.append(status_filter)
+        
+        today = date.today()
+        if deadline_filter == 'today':
+            conditions.append("t.deadline = %s")
+            params.append(today)
+        elif deadline_filter == 'tomorrow':
+            conditions.append("t.deadline = %s")
+            params.append(today + timedelta(days=1))
+        elif deadline_filter == 'next_3_days':
+            conditions.append("t.deadline BETWEEN %s AND %s")
+            params.append(today)
+            params.append(today + timedelta(days=3))
+        elif deadline_filter == 'next_week':
+            conditions.append("t.deadline BETWEEN %s AND %s")
+            params.append(today)
+            params.append(today + timedelta(days=7))
+        elif deadline_filter == 'overdue':
+            conditions.append("t.deadline < %s AND t.status != 'completed'")
+            params.append(today)
+        
+        if conditions:
+            query += " AND " + " AND ".join(conditions)
+        
+        query += " ORDER BY t.deadline ASC NULLS LAST, t.status ASC"
+        
+        cursor.execute(query, params)
+        columns = [desc[0] for desc in cursor.description]
+        rows = cursor.fetchall()
+        
+        return [dict(zip(columns, row)) for row in rows]
+        
+    except Exception as e:
+        st.error(f"Ошибка загрузки данных: {e}")
+        return []
+    finally:
+        cursor.close()
 
-# Загрузка проектов
-@st.cache_data(ttl=300)
+# Оптимизированная загрузка проектов
+@st.cache_data(ttl=300, show_spinner="Загрузка проектов...")
 def load_projects():
+    conn = init_connection()
+    if conn is None:
+        return []
+    
     cursor = conn.cursor()
-    cursor.execute("SELECT id, name FROM projects WHERE user_id = %s ORDER BY name", (TELEGRAM_USER_ID,))
-    projects = [{"id": row[0], "name": row[1]} for row in cursor.fetchall()]
-    cursor.close()
-    return projects
+    try:
+        cursor.execute("SELECT id, name FROM projects WHERE user_id = %s ORDER BY name", (TELEGRAM_USER_ID,))
+        projects = [{"id": row[0], "name": row[1]} for row in cursor.fetchall()]
+        return projects
+    except Exception as e:
+        st.error(f"Ошибка загрузки проектов: {e}")
+        return []
+    finally:
+        cursor.close()
 
-# Обновление существующих данных
+# Остальные функции остаются без изменений
 def migrate_web_data_to_telegram():
     """Перенос данных, созданных в вебе, в ваш Telegram аккаунт"""
+    conn = init_connection()
+    if conn is None:
+        return {'success': False, 'error': 'Нет подключения к БД'}
+    
+    cursor = conn.cursor()
     try:
-        cursor = conn.cursor()
-        
-        # 1. Обновляем проекты с user_id = 1 на ваш Telegram ID
         cursor.execute("""
             UPDATE projects 
             SET user_id = %s 
@@ -214,7 +210,6 @@ def migrate_web_data_to_telegram():
         
         projects_updated = cursor.rowcount
         
-        # 2. Для задач, привязанных к проектам, которые были обновлены
         cursor.execute("""
             SELECT COUNT(*) 
             FROM tasks t
@@ -241,8 +236,11 @@ def migrate_web_data_to_telegram():
     finally:
         cursor.close()
 
-# Создание проекта
 def create_project(name):
+    conn = init_connection()
+    if conn is None:
+        return None
+    
     query = """
         INSERT INTO projects (name, user_id, created_at)
         VALUES (%s, %s, NOW())
@@ -261,37 +259,27 @@ def create_project(name):
     finally:
         cursor.close()
 
-# Создание задачи
 def create_task(title, description, deadline, status, project_id):
-    query = """
-        INSERT INTO tasks (title, description, deadline, status, project_id, created_at)
-        VALUES (%s, %s, %s, %s, %s, NOW())
-    """
-    return execute_query(query, (title, description, deadline, status, project_id))
+    return execute_query(
+        "INSERT INTO tasks (title, description, deadline, status, project_id, created_at) VALUES (%s, %s, %s, %s, %s, NOW())",
+        (title, description, deadline, status, project_id)
+    )
 
-# Обновление статуса задачи
 def update_task_status(task_id, status):
     if status == 'completed':
-        query = "UPDATE tasks SET status = %s, completed_at = NOW() WHERE id = %s"
+        return execute_query("UPDATE tasks SET status = %s, completed_at = NOW() WHERE id = %s", (status, task_id))
     else:
-        query = "UPDATE tasks SET status = %s WHERE id = %s"
-    return execute_query(query, (status, task_id))
+        return execute_query("UPDATE tasks SET status = %s WHERE id = %s", (status, task_id))
 
-# Обновление задачи
 def update_task(task_id, title, description, deadline, status, project_id):
-    query = """
-        UPDATE tasks 
-        SET title = %s, description = %s, deadline = %s, status = %s, project_id = %s
-        WHERE id = %s
-    """
-    return execute_query(query, (title, description, deadline, status, project_id, task_id))
+    return execute_query(
+        "UPDATE tasks SET title = %s, description = %s, deadline = %s, status = %s, project_id = %s WHERE id = %s",
+        (title, description, deadline, status, project_id, task_id)
+    )
 
-# Удаление задачи
 def delete_task(task_id):
-    query = "DELETE FROM tasks WHERE id = %s"
-    return execute_query(query, (task_id,))
+    return execute_query("DELETE FROM tasks WHERE id = %s", (task_id,))
 
-# Статистика
 def get_statistics(tasks):
     total = len(tasks)
     pending = len([t for t in tasks if t['status'] == 'pending'])
@@ -325,15 +313,22 @@ if 'edit_task_data' not in st.session_state:
     st.session_state.edit_task_data = None
 if 'data_migrated' not in st.session_state:
     st.session_state.data_migrated = False
-# Инициализация состояния для свернутых проектов
 if 'collapsed_projects' not in st.session_state:
     st.session_state.collapsed_projects = {}
 
-# Заголовок
-st.title("🚀 Task Planner Pro Dashboard")
-st.caption(f"Обновлено: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
+# Основной интерфейс с прогресс-баром
+with st.spinner('Загрузка приложения...'):
+    # Заголовок
+    st.title("🚀 Task Planner Pro Dashboard")
+    st.caption(f"Обновлено: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
 
-# Форма редактирования задачи (ПОМЕЩЕНА ВВЕРХУ ДЛЯ УДОБСТВА)
+# Проверка подключения
+conn = init_connection()
+if conn is None:
+    st.error("⚠️ Не удалось подключиться к базе данных. Проверьте подключение к интернету и настройки базы данных.")
+    st.stop()
+
+# Форма редактирования задачи
 if st.session_state.get('editing_task'):
     st.divider()
     st.subheader("✏️ Редактировать задачу")
@@ -368,7 +363,6 @@ if st.session_state.get('editing_task'):
                 min_value=date.today() - timedelta(days=365)
             )
             
-            # Все возможные статусы, включая "В работе"
             status_options = {
                 '⏳ В ожидании': 'pending',
                 '🔄 В работе': 'in_progress',
@@ -384,7 +378,6 @@ if st.session_state.get('editing_task'):
         with col_btn2:
             cancelled = st.form_submit_button("❌ Отмена", use_container_width=True)
         with col_btn3:
-            # Кнопка быстрого завершения
             if task['status'] != 'completed':
                 if st.form_submit_button("✅ Завершить задачу", use_container_width=True):
                     if update_task_status(task['id'], 'completed'):
@@ -421,22 +414,22 @@ if st.session_state.get('editing_task'):
     
     st.divider()
 
-# Кнопка для миграции данных
+# Миграция данных
 if not st.session_state.data_migrated:
     col1, col2 = st.columns([3, 1])
     with col1:
         st.info(f"👤 Используется ваш Telegram ID: {TELEGRAM_USER_ID}")
     with col2:
-        if st.button("🔄 Перенести данные в мой аккаунт", use_container_width=True):
+        if st.button("🔄 Перенести данные", use_container_width=True):
             with st.spinner("Перенос данных..."):
                 result = migrate_web_data_to_telegram()
                 if result['success']:
-                    st.success(f"✅ Данные успешно перенесены! Обновлено проектов: {result['projects_updated']}, задач: {result['tasks_migrated']}")
+                    st.success(f"✅ Данные перенесены! Проектов: {result['projects_updated']}, задач: {result['tasks_migrated']}")
                     st.session_state.data_migrated = True
                     st.cache_data.clear()
                     st.rerun()
                 else:
-                    st.error(f"❌ Ошибка при переносе данных: {result['error']}")
+                    st.error(f"❌ Ошибка: {result['error']}")
 
 # Быстрые действия
 col1, col2, col3 = st.columns(3)
@@ -474,7 +467,7 @@ if st.session_state.get('show_add_project'):
             else:
                 project_id = create_project(project_name.strip())
                 if project_id:
-                    st.success(f"✅ Проект '{project_name}' создан! ID: {project_id}")
+                    st.success(f"✅ Проект '{project_name}' создан!")
                     st.session_state.show_add_project = False
                     st.cache_data.clear()
                     st.rerun()
@@ -550,52 +543,53 @@ if st.session_state.get('show_add_task'):
 with st.sidebar:
     st.header("🎛️ Фильтры")
     
-    # Информация о пользователе
     st.info(f"👤 Пользователь: {TELEGRAM_USER_ID}")
     
-    # Выбор проекта
-    projects = load_projects()
-    project_options = ['Все проекты'] + [p['name'] for p in projects]
-    selected_project = st.selectbox("Проект", project_options)
-    project_id = next((p['id'] for p in projects if p['name'] == selected_project), None) if selected_project != 'Все проекты' else None
-    
-    # Фильтр по статусу
-    status_options = {
-        'Все статусы': 'all',
-        '⏳ В ожидании': 'pending',
-        '🔄 В работе': 'in_progress',
-        '✅ Завершённые': 'completed',
-        '⚠️ Просроченные': 'overdue'
-    }
-    selected_status = st.selectbox("Статус", list(status_options.keys()))
-    status_filter = status_options[selected_status]
-    
-    # Фильтр по дедлайну
-    st.subheader("📅 Дедлайн")
-    deadline_options = {
-        'Все': None,
-        'Сегодня': 'today',
-        'Завтра': 'tomorrow',
-        'Ближайшие 3 дня': 'next_3_days',
-        'Ближайшая неделя': 'next_week',
-        'Просроченные': 'overdue'
-    }
-    selected_deadline = st.selectbox("Период", list(deadline_options.keys()))
-    deadline_filter = deadline_options[selected_deadline]
-    
-    st.divider()
-    
-    # Загрузка данных с фильтрами
-    tasks = load_data(
-        project_id=project_id,
-        status_filter=status_filter if status_filter != 'all' else None,
-        deadline_filter=deadline_filter
-    )
-    
-    st.info(f"📈 Показано задач: {len(tasks)}")
+    with st.spinner("Загрузка..."):
+        # Выбор проекта
+        projects = load_projects()
+        project_options = ['Все проекты'] + [p['name'] for p in projects]
+        selected_project = st.selectbox("Проект", project_options)
+        project_id = next((p['id'] for p in projects if p['name'] == selected_project), None) if selected_project != 'Все проекты' else None
+        
+        # Фильтр по статусу
+        status_options = {
+            'Все статусы': 'all',
+            '⏳ В ожидании': 'pending',
+            '🔄 В работе': 'in_progress',
+            '✅ Завершённые': 'completed',
+            '⚠️ Просроченные': 'overdue'
+        }
+        selected_status = st.selectbox("Статус", list(status_options.keys()))
+        status_filter = status_options[selected_status]
+        
+        # Фильтр по дедлайну
+        st.subheader("📅 Дедлайн")
+        deadline_options = {
+            'Все': None,
+            'Сегодня': 'today',
+            'Завтра': 'tomorrow',
+            'Ближайшие 3 дня': 'next_3_days',
+            'Ближайшая неделя': 'next_week',
+            'Просроченные': 'overdue'
+        }
+        selected_deadline = st.selectbox("Период", list(deadline_options.keys()))
+        deadline_filter = deadline_options[selected_deadline]
+        
+        st.divider()
+        
+        # Загрузка данных с фильтрами
+        tasks = load_data(
+            project_id=project_id,
+            status_filter=status_filter if status_filter != 'all' else None,
+            deadline_filter=deadline_filter
+        )
+        
+        st.info(f"📈 Показано задач: {len(tasks)}")
 
 # Статистика
-stats = get_statistics(tasks)
+with st.spinner("Расчет статистики..."):
+    stats = get_statistics(tasks)
 
 col1, col2, col3, col4, col5 = st.columns(5)
 with col1:
@@ -614,12 +608,11 @@ st.divider()
 st.subheader("⏰ Ближайшие дедлайны")
 
 today = date.today()
-# ИСКЛЮЧАЕМ завершенные задачи из этого раздела
 urgent_tasks = [t for t in tasks if t['deadline'] and t['status'] != 'completed' and today <= t['deadline'] <= today + timedelta(days=7)]
 urgent_tasks.sort(key=lambda x: x['deadline'])
 
 if urgent_tasks:
-    for task in urgent_tasks[:10]:
+    for task in urgent_tasks[:8]:  # Уменьшили с 10 до 8
         days_left = (task['deadline'] - today).days
         
         if days_left < 0:
@@ -682,18 +675,17 @@ if urgent_tasks:
             if task['description']:
                 st.markdown(f"**Описание:** {task['description']}")
 else:
-    st.info("Нет активных задач с дедлайнами в ближайшие 7 дней (завершенные задачи скрыты)")
+    st.info("Нет активных задач с дедлайнами в ближайшие 7 дней")
 
-# Канбан-доска
+# Упрощенная Канбан-доска
 st.divider()
 st.subheader("📋 Канбан-доска")
 
-status_order = ['pending', 'in_progress', 'completed', 'overdue']
+status_order = ['pending', 'in_progress', 'completed']
 status_names = {
     'pending': '⏳ В ожидании',
     'in_progress': '🔄 В работе',
-    'completed': '✅ Завершено',
-    'overdue': '⚠️ Просрочено'
+    'completed': '✅ Завершено'
 }
 
 cols = st.columns(len(status_order))
@@ -707,7 +699,7 @@ for idx, status in enumerate(status_order):
         if not status_tasks:
             st.caption("_Нет задач_")
         else:
-            for task in status_tasks[:8]:
+            for task in status_tasks[:5]:  # Уменьшили с 8 до 5
                 deadline_str = task['deadline'].strftime('%d.%m') if task['deadline'] else '—'
                 
                 if task['deadline']:
@@ -721,19 +713,18 @@ for idx, status in enumerate(status_order):
                 else:
                     deadline_class = ""
                 
-                task_html = f"""
+                st.markdown(f"""
                 <div class="task-card">
-                    <b class="task-title">{task['title']}</b><br>
-                    <small class="project-name">📁 {task['project_name'] or 'Без проекта'}</small><br>
+                    <b>{task['title']}</b><br>
+                    <small>📁 {task['project_name'] or 'Без проекта'}</small><br>
                     <small>🕗 <span class="{deadline_class}">{deadline_str}</span></small>
                 </div>
-                """
-                st.markdown(task_html, unsafe_allow_html=True)
+                """, unsafe_allow_html=True)
             
-            if len(status_tasks) > 8:
-                st.caption(f"... и ещё {len(status_tasks) - 8} задач")
+            if len(status_tasks) > 5:
+                st.caption(f"... и ещё {len(status_tasks) - 5} задач")
 
-# Список задач в стиле "Дедлайны" с группировкой по проектам
+# Список задач с группировкой по проектам
 st.divider()
 st.subheader("📝 Список задач")
 
@@ -755,14 +746,11 @@ if tasks:
         # Определяем, свернут ли проект
         is_collapsed = st.session_state.collapsed_projects.get(project_name, False)
         
-        # Заголовок проекта с кнопкой сворачивания
+        # Заголовок проекта
         col1, col2 = st.columns([5, 1])
         
         with col1:
-            if is_collapsed:
-                st.markdown(f'<div class="collapsed"><h4>📁 {project_name} ({len(project_tasks)} задач) 🔽</h4></div>', unsafe_allow_html=True)
-            else:
-                st.markdown(f'<div class="project-group"><h4>📁 {project_name} ({len(project_tasks)} задач) 🔼</h4></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="project-group"><h4>📁 {project_name} ({len(project_tasks)} задач)</h4></div>', unsafe_allow_html=True)
         
         with col2:
             button_text = "Свернуть" if not is_collapsed else "Развернуть"
@@ -794,7 +782,6 @@ if tasks:
                     icon = "🟢"
                     deadline_class = "deadline-normal"
                 
-                # Определяем статус задачи
                 status_map = {
                     'pending': '<span class="status-pending">⏳ В ожидании</span>',
                     'in_progress': '<span class="status-in_progress">🔄 В работе</span>',
@@ -805,9 +792,7 @@ if tasks:
                 
                 deadline_str = task['deadline'].strftime('%d.%m.%Y') if task['deadline'] else '—'
                 
-                # Создаем карточку задачи в стиле "Дедлайнов"
                 with st.expander(f"{icon} {task['title']}"):
-                    # Верхняя часть карточки
                     col_a, col_b, col_c = st.columns([2, 2, 1])
                     
                     with col_a:
@@ -822,10 +807,8 @@ if tasks:
                             st.markdown(f"**⚠️ Просрочено на:** {abs(days_left)} дн.")
                     
                     with col_c:
-                        # Кнопки действий в строку
-                        action_col1, action_col2, action_col3 = st.columns(3)
-                        
-                        with action_col1:
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
                             if task['status'] != 'completed':
                                 if st.button("✅", key=f"list_complete_{task['id']}", help="Завершить", use_container_width=True):
                                     if update_task_status(task['id'], 'completed'):
@@ -833,7 +816,7 @@ if tasks:
                                         st.cache_data.clear()
                                         st.rerun()
                         
-                        with action_col2:
+                        with col2:
                             if task['status'] != 'in_progress' and task['status'] != 'completed':
                                 if st.button("🔄", key=f"list_inprogress_{task['id']}", help="В работу", use_container_width=True):
                                     if update_task_status(task['id'], 'in_progress'):
@@ -841,54 +824,41 @@ if tasks:
                                         st.cache_data.clear()
                                         st.rerun()
                         
-                        with action_col3:
+                        with col3:
                             if st.button("✏️", key=f"list_edit_{task['id']}", help="Редактировать", use_container_width=True):
                                 st.session_state.editing_task = task['id']
                                 st.session_state.edit_task_data = task
                                 st.rerun()
                     
-                    # Описание задачи
                     if task['description']:
                         st.markdown("---")
                         st.markdown(f"**📝 Описание:** {task['description']}")
                     
-                    # Дополнительные кнопки действий
-                    col_x, col_y, col_z = st.columns(3)
-                    with col_x:
-                        if st.button("📋 Подробнее", key=f"details_{task['id']}", use_container_width=True):
-                            # Здесь можно добавить дополнительную информацию
-                            st.info(f"Задача создана: {task['created_at'].strftime('%d.%m.%Y') if task['created_at'] else '—'}")
-                    
-                    with col_y:
-                        if task['status'] == 'completed' and task['completed_at']:
-                            st.info(f"✅ Завершена: {task['completed_at'].strftime('%d.%m.%Y') if task['completed_at'] else '—'}")
-                    
-                    with col_z:
-                        if st.button("🗑️ Удалить", key=f"delete_{task['id']}", use_container_width=True):
-                            if delete_task(task['id']):
-                                st.success("🗑️ Задача удалена!")
-                                st.cache_data.clear()
-                                st.rerun()
+                    if st.button("🗑️ Удалить задачу", key=f"delete_{task['id']}", use_container_width=True):
+                        if delete_task(task['id']):
+                            st.success("🗑️ Задача удалена!")
+                            st.cache_data.clear()
+                            st.rerun()
 else:
     st.info("Нет задач, удовлетворяющих фильтрам")
 
-# Кнопки управления внизу
+# Управление
 st.divider()
 col1, col2, col3 = st.columns(3)
 with col1:
     if st.button("⬆️ Наверх", use_container_width=True):
         st.rerun()
 with col2:
-    if st.button("🔄 Сбросить фильтры", use_container_width=True):
+    if st.button("🔄 Сбросить всё", use_container_width=True):
         st.session_state.collapsed_projects = {}
         st.cache_data.clear()
         st.rerun()
 with col3:
-    if st.button("📋 Развернуть все проекты", use_container_width=True):
+    if st.button("📋 Развернуть все", use_container_width=True):
         for project_name in st.session_state.collapsed_projects:
             st.session_state.collapsed_projects[project_name] = False
         st.rerun()
 
 # Footer
 st.divider()
-st.caption(f"Task Planner Pro Dashboard • Пользователь: {TELEGRAM_USER_ID} • Данные обновляются каждые 30 секунд")
+st.caption(f"Task Planner Pro • Пользователь: {TELEGRAM_USER_ID} • Обновление каждые 60 секунд")
