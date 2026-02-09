@@ -29,6 +29,11 @@ st.markdown("""
         background: #f9f9f9; 
         box-shadow: 0 2px 4px rgba(0,0,0,0.1); 
         color: #333;
+        transition: transform 0.2s, box-shadow 0.2s;
+    }
+    .task-card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 8px rgba(0,0,0,0.15);
     }
     .task-card b { color: #333; }
     .task-card small { color: #666; }
@@ -36,28 +41,63 @@ st.markdown("""
     .project-name { color: #333 !important; }
     .task-title { color: #333 !important; }
     .project-group { 
-        background-color: #1E3A8A; 
-        padding: 10px 15px; 
+        background: linear-gradient(135deg, #1E3A8A 0%, #3B82F6 100%); 
+        padding: 12px 20px; 
         border-radius: 8px; 
-        margin: 15px 0 10px 0;
-        border-left: 4px solid #FFD700;
+        margin: 20px 0 15px 0;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         color: white !important;
     }
-    .project-group h4 { color: white !important; }
+    .project-group h4 { 
+        color: white !important; 
+        margin: 0;
+        font-size: 1.2rem;
+    }
     .collapsed { 
-        background-color: #3B82F6; 
-        padding: 10px 15px; 
+        background: linear-gradient(135deg, #3B82F6 0%, #60A5FA 100%);
+        padding: 12px 20px; 
         border-radius: 8px; 
-        margin: 15px 0 10px 0;
-        border-left: 4px solid #FFD700;
+        margin: 20px 0 15px 0;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     }
-    .task-row {
-        border-bottom: 1px solid #e0e0e0;
-        padding: 12px 0;
-        transition: background-color 0.2s;
+    .collapsed h4 { 
+        color: white !important; 
+        margin: 0;
+        font-size: 1.2rem;
     }
-    .task-row:hover {
-        background-color: #f8f9fa;
+    .task-actions {
+        display: flex;
+        gap: 5px;
+        margin-top: 8px;
+        flex-wrap: wrap;
+    }
+    .task-actions button {
+        padding: 4px 8px !important;
+        font-size: 0.8rem !important;
+        min-height: unset !important;
+    }
+    .task-content {
+        padding: 15px;
+    }
+    .task-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 8px;
+        font-size: 0.9rem;
+    }
+    .task-project {
+        background-color: #e8f4fd;
+        padding: 2px 8px;
+        border-radius: 4px;
+        color: #1E3A8A;
+        font-weight: 500;
+    }
+    .task-description {
+        margin-top: 8px;
+        color: #666;
+        font-size: 0.9rem;
+        line-height: 1.4;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -693,7 +733,7 @@ for idx, status in enumerate(status_order):
             if len(status_tasks) > 8:
                 st.caption(f"... и ещё {len(status_tasks) - 8} задач")
 
-# Таблица задач с группировкой по проектам и возможностью сворачивания
+# Список задач в стиле "Дедлайны" с группировкой по проектам
 st.divider()
 st.subheader("📝 Список задач")
 
@@ -715,7 +755,7 @@ if tasks:
         # Определяем, свернут ли проект
         is_collapsed = st.session_state.collapsed_projects.get(project_name, False)
         
-        # Создаем заголовок с кнопкой сворачивания/разворачивания
+        # Заголовок проекта с кнопкой сворачивания
         col1, col2 = st.columns([5, 1])
         
         with col1:
@@ -733,91 +773,111 @@ if tasks:
         # Отображаем задачи проекта, если не свернуто
         if not is_collapsed:
             for task in project_tasks:
+                days_left = None
+                if task['deadline']:
+                    days_left = (task['deadline'] - today).days
+                
+                # Определяем иконку и цвет дедлайна
+                if not task['deadline']:
+                    icon = "⚪"
+                    deadline_class = ""
+                elif days_left < 0:
+                    icon = "🔴"
+                    deadline_class = "deadline-urgent"
+                elif days_left == 0:
+                    icon = "🟠"
+                    deadline_class = "deadline-urgent"
+                elif days_left <= 2:
+                    icon = "🟡"
+                    deadline_class = "deadline-warning"
+                else:
+                    icon = "🟢"
+                    deadline_class = "deadline-normal"
+                
+                # Определяем статус задачи
                 status_map = {
-                    'pending': '⏳ В ожидании',
-                    'in_progress': '🔄 В работе',
-                    'completed': '✅ Завершено',
-                    'overdue': '⚠️ Просрочено'
+                    'pending': '<span class="status-pending">⏳ В ожидании</span>',
+                    'in_progress': '<span class="status-in_progress">🔄 В работе</span>',
+                    'completed': '<span class="status-completed">✅ Завершено</span>',
+                    'overdue': '<span class="status-overdue">⚠️ Просрочено</span>'
                 }
-                status_display = status_map.get(task['status'], task['status'])
+                status_html = status_map.get(task['status'], task['status'])
                 
                 deadline_str = task['deadline'].strftime('%d.%m.%Y') if task['deadline'] else '—'
                 
-                # Определяем цвет статуса
-                status_color = ""
-                if task['status'] == 'pending':
-                    status_color = "🟡"
-                elif task['status'] == 'in_progress':
-                    status_color = "🔵"
-                elif task['status'] == 'completed':
-                    status_color = "🟢"
-                elif task['status'] == 'overdue':
-                    status_color = "🔴"
-                
-                with st.container():
-                    st.markdown('<div class="task-row">', unsafe_allow_html=True)
-                    col1, col2, col3, col4, col5 = st.columns([3, 2, 1.5, 1.5, 2])
-                    with col1:
-                        st.markdown(f"**{task['title']}**")
-                        if task['description']:
-                            st.caption(task['description'][:80] + "..." if len(task['description']) > 80 else task['description'])
-                    with col2:
-                        st.markdown(f"📁 {task['project_name'] or '—'}")
-                    with col3:
-                        st.markdown(f"{status_color} {status_display}")
-                    with col4:
-                        # Цвет дедлайна в зависимости от срока
-                        if task['deadline']:
-                            days_left = (task['deadline'] - today).days
-                            if days_left < 0:
-                                deadline_color = "🔴"
-                            elif days_left == 0:
-                                deadline_color = "🟠"
-                            elif days_left <= 2:
-                                deadline_color = "🟡"
-                            else:
-                                deadline_color = "🟢"
-                            st.markdown(f"{deadline_color} {deadline_str}")
-                        else:
-                            st.markdown(f"🕗 {deadline_str}")
-                    with col5:
-                        # Компактные кнопки действий
-                        col_a, col_b, col_c, col_d = st.columns(4)
-                        with col_a:
+                # Создаем карточку задачи в стиле "Дедлайнов"
+                with st.expander(f"{icon} {task['title']}"):
+                    # Верхняя часть карточки
+                    col_a, col_b, col_c = st.columns([2, 2, 1])
+                    
+                    with col_a:
+                        st.markdown(f"**📁 Проект:** {task['project_name'] or '—'}")
+                        st.markdown(f"**📊 Статус:** {status_html}", unsafe_allow_html=True)
+                    
+                    with col_b:
+                        st.markdown(f'<p><b>⏰ Дедлайн:</b> <span class="{deadline_class}">{deadline_str}</span></p>', unsafe_allow_html=True)
+                        if days_left is not None and days_left >= 0:
+                            st.markdown(f"**📅 Осталось:** {days_left} дн.")
+                        elif days_left is not None:
+                            st.markdown(f"**⚠️ Просрочено на:** {abs(days_left)} дн.")
+                    
+                    with col_c:
+                        # Кнопки действий в строку
+                        action_col1, action_col2, action_col3 = st.columns(3)
+                        
+                        with action_col1:
                             if task['status'] != 'completed':
-                                if st.button("✅", key=f"quick_complete_{task['id']}", help="Завершить", use_container_width=True):
+                                if st.button("✅", key=f"list_complete_{task['id']}", help="Завершить", use_container_width=True):
                                     if update_task_status(task['id'], 'completed'):
                                         st.success("✅ Задача завершена!")
                                         st.cache_data.clear()
                                         st.rerun()
-                        with col_b:
-                            if st.button("🔄", key=f"quick_inprogress_{task['id']}", help="В работу", use_container_width=True):
-                                if update_task_status(task['id'], 'in_progress'):
-                                    st.success("🔄 Задача в работе!")
-                                    st.cache_data.clear()
-                                    st.rerun()
-                        with col_c:
-                            if st.button("✏️", key=f"quick_edit_{task['id']}", help="Редактировать", use_container_width=True):
+                        
+                        with action_col2:
+                            if task['status'] != 'in_progress' and task['status'] != 'completed':
+                                if st.button("🔄", key=f"list_inprogress_{task['id']}", help="В работу", use_container_width=True):
+                                    if update_task_status(task['id'], 'in_progress'):
+                                        st.success("🔄 Задача в работе!")
+                                        st.cache_data.clear()
+                                        st.rerun()
+                        
+                        with action_col3:
+                            if st.button("✏️", key=f"list_edit_{task['id']}", help="Редактировать", use_container_width=True):
                                 st.session_state.editing_task = task['id']
                                 st.session_state.edit_task_data = task
                                 st.rerun()
-                        with col_d:
-                            if st.button("🗑️", key=f"quick_delete_{task['id']}", help="Удалить", use_container_width=True):
-                                if delete_task(task['id']):
-                                    st.success("🗑️ Задача удалена!")
-                                    st.cache_data.clear()
-                                    st.rerun()
-                    st.markdown('</div>', unsafe_allow_html=True)
-                    st.divider()
+                    
+                    # Описание задачи
+                    if task['description']:
+                        st.markdown("---")
+                        st.markdown(f"**📝 Описание:** {task['description']}")
+                    
+                    # Дополнительные кнопки действий
+                    col_x, col_y, col_z = st.columns(3)
+                    with col_x:
+                        if st.button("📋 Подробнее", key=f"details_{task['id']}", use_container_width=True):
+                            # Здесь можно добавить дополнительную информацию
+                            st.info(f"Задача создана: {task['created_at'].strftime('%d.%m.%Y') if task['created_at'] else '—'}")
+                    
+                    with col_y:
+                        if task['status'] == 'completed' and task['completed_at']:
+                            st.info(f"✅ Завершена: {task['completed_at'].strftime('%d.%m.%Y') if task['completed_at'] else '—'}")
+                    
+                    with col_z:
+                        if st.button("🗑️ Удалить", key=f"delete_{task['id']}", use_container_width=True):
+                            if delete_task(task['id']):
+                                st.success("🗑️ Задача удалена!")
+                                st.cache_data.clear()
+                                st.rerun()
 else:
     st.info("Нет задач, удовлетворяющих фильтрам")
 
-# Кнопки быстрых действий внизу
+# Кнопки управления внизу
 st.divider()
 col1, col2, col3 = st.columns(3)
 with col1:
     if st.button("⬆️ Наверх", use_container_width=True):
-        st.rerun()  # Простая перезагрузка вернет наверх
+        st.rerun()
 with col2:
     if st.button("🔄 Сбросить фильтры", use_container_width=True):
         st.session_state.collapsed_projects = {}
